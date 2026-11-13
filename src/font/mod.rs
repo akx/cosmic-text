@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use harfrust::Shaper;
 use linebender_resource_handle::{Blob, FontData};
-use skrifa::raw::{ReadError, TableProvider as _};
+use skrifa::raw::TableProvider as _;
 use skrifa::{metrics::Metrics, prelude::*};
 // re-export skrifa
 pub use skrifa;
@@ -16,7 +15,6 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use fontdb::Style;
-use self_cell::self_cell;
 
 pub mod fallback;
 pub use fallback::{Fallback, PlatformFallback};
@@ -27,21 +25,6 @@ mod system;
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 mod cache;
 
-struct OwnedFaceData {
-    data: Arc<dyn AsRef<[u8]> + Send + Sync>,
-    shaper_data: harfrust::ShaperData,
-    shaper_instance: harfrust::ShaperInstance,
-    metrics: Metrics,
-}
-
-self_cell!(
-    struct OwnedFace {
-        owner: OwnedFaceData,
-
-        #[covariant]
-        dependent: Shaper,
-    }
-);
 
 struct FontMonospaceFallback {
     monospace_em_width: Option<f32>,
@@ -53,7 +36,8 @@ struct FontMonospaceFallback {
 pub struct Font {
     #[cfg(feature = "swash")]
     swash: (u32, swash::CacheKey),
-    harfrust: OwnedFace,
+    harfrust: harfrust::Font,
+    metrics: Metrics,
     data: FontData,
     id: fontdb::ID,
     monospace_fallback: Option<FontMonospaceFallback>,
@@ -93,16 +77,12 @@ impl Font {
         self.data.data.data()
     }
 
-    pub fn shaper(&self) -> &harfrust::Shaper<'_> {
-        self.harfrust.borrow_dependent()
-    }
-
-    pub(crate) fn shaper_instance(&self) -> &harfrust::ShaperInstance {
-        &self.harfrust.borrow_owner().shaper_instance
+    pub fn shaper_font(&self) -> &harfrust::Font {
+        &self.harfrust
     }
 
     pub fn metrics(&self) -> &Metrics {
-        &self.harfrust.borrow_owner().metrics
+        &self.metrics
     }
 
     #[cfg(feature = "peniko")]
@@ -200,12 +180,13 @@ impl Font {
             None
         };
 
-        let (shaper_instance, shaper_data) = {
-            (
-                harfrust::ShaperInstance::from_coords(&font_ref, location.coords().iter().copied()),
-                harfrust::ShaperData::new(&font_ref),
-            )
-        };
+        let harfrust = harfrust::Font::new(
+            harfrust::font::Blob::from(Arc::clone(&data)),
+            info.index,
+        )?
+        .instance_builder()
+        .variations([(Tag::new(b"wght"), weight.0 as f32)])
+        .build();
 
         Some(Self {
             id: info.id,
@@ -215,28 +196,8 @@ impl Font {
                 let swash = swash::FontRef::from_index((*data).as_ref(), info.index as usize)?;
                 (swash.offset, swash.key)
             },
-            harfrust: OwnedFace::try_new(
-                OwnedFaceData {
-                    data: Arc::clone(&data),
-                    shaper_data,
-                    shaper_instance,
-                    metrics,
-                },
-                |OwnedFaceData {
-                     data,
-                     shaper_data,
-                     shaper_instance,
-                     ..
-                 }| {
-                    let font_ref = FontRef::from_index((**data).as_ref(), info.index)?;
-                    let shaper = shaper_data
-                        .shaper(&font_ref)
-                        .instance(Some(shaper_instance))
-                        .build();
-                    Ok::<_, ReadError>(shaper)
-                },
-            )
-            .ok()?,
+            harfrust,
+            metrics,
             data: FontData::new(Blob::new(data), info.index),
             italic_or_oblique: info.style == Style::Italic || info.style == Style::Oblique,
         })

@@ -115,7 +115,7 @@ pub struct ShapeBuffer {
     shape_plan_cache: VecDeque<(fontdb::ID, harfrust::ShapePlan)>,
 
     /// Buffer for holding unicode text.
-    harfrust_buffer: Option<harfrust::UnicodeBuffer>,
+    harfrust_buffer: Option<harfrust::Buffer>,
 
     /// Temporary buffers for scripts.
     scripts: Vec<Script>,
@@ -196,10 +196,9 @@ fn shape_fallback(
         ));
     }
 
-    let language = buffer.language();
-    let key = harfrust::ShapePlanKey::new(Some(buffer.script()), buffer.direction())
+    let language = buffer.language().cloned();
+    let key = harfrust::ShapePlanKey::new(font.shaper_font(), buffer.script(), buffer.direction())
         .features(&rb_font_features)
-        .instance(Some(font.shaper_instance()))
         .language(language.as_ref());
 
     let shape_plan = match scratch
@@ -210,10 +209,10 @@ fn shape_fallback(
         Some((_font_id, plan)) => plan,
         None => {
             let plan = harfrust::ShapePlan::new(
-                font.shaper(),
+                font.shaper_font(),
                 buffer.direction(),
-                Some(buffer.script()),
-                buffer.language().as_ref(),
+                buffer.script(),
+                language.as_ref(),
                 &rb_font_features,
             );
             if scratch.shape_plan_cache.len() >= NUM_SHAPE_PLANS {
@@ -228,12 +227,16 @@ fn shape_fallback(
         }
     };
 
-    let glyph_buffer = font.shaper().shape(
-        buffer,
+    let shaper_font = harfrust::ShaperFont::new(font.shaper_font());
+    let mut glyph_buffer = buffer;
+    harfrust::shape(
+        &shaper_font,
+        &mut glyph_buffer,
         harfrust::ShapeOptions::new()
             .plan(Some(shape_plan))
             .features(&rb_font_features),
-    );
+    )
+    .expect("harfrust shaping failed");
     let glyph_infos = glyph_buffer.glyph_infos();
     let glyph_positions = glyph_buffer.glyph_positions();
 
@@ -301,7 +304,8 @@ fn shape_fallback(
     }
 
     // Restore the buffer to save an allocation.
-    scratch.harfrust_buffer = Some(glyph_buffer.clear());
+    glyph_buffer.clear();
+    scratch.harfrust_buffer = Some(glyph_buffer);
 
     missing
 }
